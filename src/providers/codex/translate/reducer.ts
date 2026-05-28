@@ -22,6 +22,31 @@ export interface CodexUsage {
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens"
 
+// ----- Codex rate-limit cache -----
+// Most-recent `codex.rate_limits` payload observed on any streamed
+// response, plus the wall-clock time we observed it. Exposed via the
+// GET /usage endpoint so external monitors can read it without spending
+// any additional rate-limit budget. The cache is process-local; it is
+// not persisted across `serve` restarts.
+
+export interface CodexRateLimitsSnapshot {
+  rate_limits: unknown
+  captured_at: string // ISO-8601 UTC
+}
+
+let _lastCodexRateLimits: CodexRateLimitsSnapshot | null = null
+
+export function recordCodexRateLimits(rateLimits: unknown): void {
+  _lastCodexRateLimits = {
+    rate_limits: rateLimits,
+    captured_at: new Date().toISOString(),
+  }
+}
+
+export function getLastCodexRateLimits(): CodexRateLimitsSnapshot | null {
+  return _lastCodexRateLimits
+}
+
 export type ReducerEvent =
   | { kind: "text-start"; index: number }
   | { kind: "text-delta"; index: number; text: string }
@@ -100,6 +125,14 @@ export async function* reduceUpstream(
     if (logVerbose()) log.debug("upstream event", { type: t, output_index: p.output_index, item_id: p.item_id })
 
     if (t === "codex.rate_limits") {
+      // Cache the most recent rate-limits payload so external monitors
+      // can query it via GET /usage without spending any additional
+      // rate-limit budget. We piggyback on the user's real Claude Code
+      // traffic — the payload is already in the stream, we just retain
+      // a copy for inspection.
+      if (p.rate_limits) {
+        recordCodexRateLimits(p.rate_limits)
+      }
       if (p.rate_limits?.limit_reached) {
         throw new UpstreamStreamError(
           "rate_limit",

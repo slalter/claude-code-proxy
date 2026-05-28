@@ -112,6 +112,33 @@ async function route(req: Request, url: URL, reqId: string): Promise<Response> {
     })
   }
 
+  if (req.method === "GET" && url.pathname === "/usage") {
+    // Lazy import so the codex provider stays the canonical owner of the
+    // rate-limits cache (avoids a circular import via server.ts).
+    const { getLastCodexRateLimits } = await import(
+      "./providers/codex/translate/reducer.ts"
+    )
+    const snapshot = getLastCodexRateLimits()
+    if (!snapshot) {
+      return new Response(
+        JSON.stringify({
+          codex: null,
+          note: "no codex.rate_limits event observed since this serve started",
+        }),
+        { headers: { "content-type": "application/json" } },
+      )
+    }
+    return new Response(
+      JSON.stringify({
+        codex: {
+          rate_limits: snapshot.rate_limits,
+          captured_at: snapshot.captured_at,
+        },
+      }),
+      { headers: { "content-type": "application/json" } },
+    )
+  }
+
   if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
     const body = await parseJsonBody(req)
     if (body instanceof Response) return body
