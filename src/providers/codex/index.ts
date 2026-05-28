@@ -10,7 +10,7 @@ import {
 import { InvalidServiceTierError, translateRequest } from "./translate/request.ts"
 import { translateStream } from "./translate/stream.ts"
 import { accumulateResponse, UpstreamStreamError } from "./translate/accumulate.ts"
-import { mapUsageToAnthropic } from "./translate/reducer.ts"
+import { mapUsageToAnthropic, recordCodexRateLimits } from "./translate/reducer.ts"
 import { CodexError, postCodex } from "./client.ts"
 import { countTokens, countTranslatedTokens } from "./count-tokens.ts"
 import { runBrowserLogin } from "./auth/pkce.ts"
@@ -251,6 +251,26 @@ async function handleMessages(body: AnthropicRequest, ctx: RequestContext): Prom
       return jsonError(err.status, type, err.detail || err.message)
     }
     throw err
+  }
+
+  // Capture x-codex-* rate-limit headers on every successful Codex response.
+  // ChatGPT subscription auth ships the 5h / 7d usage data here (not in
+  // the SSE stream — codex.rate_limits events only fire on limit_reached).
+  // External monitors poll GET /usage to read the latest snapshot without
+  // spending any extra rate-limit budget — we piggyback on the user's
+  // real Claude Code traffic.
+  {
+    const headerSnapshot: Record<string, string> = {}
+    upstream.headers.forEach((v, k) => {
+      const lk = k.toLowerCase()
+      if (lk.startsWith("x-codex-")) headerSnapshot[lk] = v
+    })
+    if (Object.keys(headerSnapshot).length > 0) {
+      // Store under the same cache the legacy `codex.rate_limits` event
+      // would have populated. Shape mirrors what the api side already
+      // knows how to parse (parse_codex_headers / apply_codex_usage_headers).
+      recordCodexRateLimits({ headers: headerSnapshot })
+    }
   }
 
   if (wantStream) {
