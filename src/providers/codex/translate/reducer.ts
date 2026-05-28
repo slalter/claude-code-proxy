@@ -47,6 +47,16 @@ export function getLastCodexRateLimits(): CodexRateLimitsSnapshot | null {
   return _lastCodexRateLimits
 }
 
+// ----- Diagnostic: distinct upstream SSE event types observed -----
+// Module-level set seeded once at first import. Each event type is
+// logged exactly once (the first time we see it) at info level. Used
+// to discover the actual upstream event name carrying rate-limit data
+// in v0.0.13-gurucloud.2.
+const _seenEventTypes = new Set<string>()
+export function getObservedEventTypes(): string[] {
+  return Array.from(_seenEventTypes).sort()
+}
+
 export type ReducerEvent =
   | { kind: "text-start"; index: number }
   | { kind: "text-delta"; index: number; text: string }
@@ -123,6 +133,32 @@ export async function* reduceUpstream(
     const t: string = p.type || evt.event || ""
 
     if (logVerbose()) log.debug("upstream event", { type: t, output_index: p.output_index, item_id: p.item_id })
+
+    // Diagnostic (slalter/claude-code-proxy v0.0.13-gurucloud.2): log the
+    // distinct upstream event types seen during this response at info
+    // level, regardless of LOG_VERBOSE. Lets us discover the actual
+    // event name that carries rate-limit data — the gurucloud /usage
+    // cache stayed empty on 2026-05-28 because the `codex.rate_limits`
+    // branch never fired, and we need to know what upstream is calling
+    // the event instead. One log line per distinct type per response;
+    // bounded by the number of distinct event types Codex emits.
+    if (!_seenEventTypes.has(t)) {
+      _seenEventTypes.add(t)
+      log.info("upstream_event_type_seen", { type: t })
+    }
+
+    // Defensive catch-all: any event whose payload carries a
+    // `rate_limits` object — under whatever event type — gets recorded.
+    // This is intentionally loose: we'd rather over-record (with a
+    // structured object) than miss a rename.
+    if (p && typeof p === "object" && p.rate_limits && typeof p.rate_limits === "object") {
+      recordCodexRateLimits(p.rate_limits)
+      log.info("recorded rate_limits via catch-all", {
+        event_type: t,
+        has_primary: !!p.rate_limits.primary,
+        has_secondary: !!p.rate_limits.secondary,
+      })
+    }
 
     if (t === "codex.rate_limits") {
       // Cache the most recent rate-limits payload so external monitors
